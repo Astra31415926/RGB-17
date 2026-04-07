@@ -303,11 +303,10 @@
     </div>
 
 <script>
-// RGB-11 Fixed & Improved Scanner v2.3 — виправлена версія
-// 1. Fixed missing functions (globalReset, generateQR, updateResultUI, etc.)
-// 2. Implemented robust Adaptive Binarization with per-channel state.
-// 3. Round-Robin processing + Channel Gating.
-// 4. Reusable offscreen canvas for performance.
+// RGB-11 Fixed & Improved Scanner v2.4 — Final Fix
+// 1. Fixed Gallery Scan: Removed dependency on 'scanning' flag for processing logic.
+// 2. Fixed Success Logic: Split handling for Camera (capture frame) vs File (already has frame).
+// 3. Adaptive Bradley + Round Robin maintained.
 
         const translations = {
             uk: {
@@ -356,69 +355,53 @@
         };
 
         let currentLang = 'uk';
-        let scanning = false;
+        let scanning = false; // Only true for Camera mode
         let results = {r:null, g:null, b:null};
         let analysisReady = false;
 
-        // --- NEW SCANNER LOGIC START ---
+        // --- SCANNER LOGIC ---
         
-        // Reusable canvas for performance
         const offscreenCanvas = document.createElement('canvas');
         const offscreenCtx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
         
-        // State per channel for Adaptive Bradley
         const scannerStates = {
             r: { fails: 0, t: 15, s: 8, contrast: 1.1 },
             g: { fails: 0, t: 15, s: 8, contrast: 1.1 },
             b: { fails: 0, t: 15, s: 8, contrast: 1.1 }
         };
         
-        let rrIndex = 0; // Round robin index
+        let rrIndex = 0; 
 
-        // 1. Adaptive Binarization Function
         function applyBradleyAdaptive(imgData, chIdx, state) {
             const w = imgData.width, h = imgData.height;
             const input = imgData.data;
             const output = new Uint8ClampedArray(w * h * 4);
             const intImg = new Int32Array(w * h);
             
-            const t = state.t; // Threshold %
-            const s = Math.max(1, Math.floor(w / state.s)); // Window size, ensure min 1
+            const t = state.t; 
+            const s = Math.max(1, Math.floor(w / state.s)); 
             const contrast = state.contrast;
 
-            // Calculate Integral Image with Contrast Boost
             for (let y = 0; y < h; y++) {
                 let sum = 0;
                 for (let x = 0; x < w; x++) {
                     const idx = (y * w + x) * 4;
                     let val = input[idx + chIdx];
-                    
-                    // Simple Contrast Boost
                     val = ((val / 255.0 - 0.5) * contrast + 0.5) * 255.0;
                     if (val < 0) val = 0; if (val > 255) val = 255;
-                    
                     sum += val;
                     intImg[y * w + x] = (y > 0 ? intImg[(y - 1) * w + x] : 0) + sum;
                 }
             }
 
-            // Binarization
             for (let y = 0; y < h; y++) {
                 for (let x = 0; x < w; x++) {
                     const x1 = Math.max(x - s, 0), x2 = Math.min(x + s, w - 1);
                     const y1 = Math.max(y - s, 0), y2 = Math.min(y + s, h - 1);
                     const count = (x2 - x1) * (y2 - y1);
-                    
                     const sum = intImg[y2 * w + x2] - intImg[y1 * w + x2] - intImg[y2 * w + x1] + intImg[y1 * w + x1];
-                    
-                    // Using original input value for threshold check (standard Bradley)
-                    // Or using 'val' from above if we want contrast boosted check. 
-                    // Usually applying contrast to the source image data helps, but let's stick to input for stability.
                     const val = input[(y * w + x) * 4 + chIdx];
-                    
-                    // Standard Bradley formula
                     const res = (val * count < sum * (100 - t) / 100) ? 0 : 255;
-                    
                     const outIdx = (y * w + x) * 4;
                     output[outIdx] = output[outIdx+1] = output[outIdx+2] = res; 
                     output[outIdx+3] = 255;
@@ -427,20 +410,18 @@
             return output;
         }
 
-        // 2. Dynamic Parameter Adjuster
         function updateScannerParams(state) {
             state.fails++;
-            // Every 5 frames, change strategy
             if (state.fails % 5 === 0) {
-                state.t = 10 + Math.floor(Math.random() * 25); // Range 10-35
-                state.s = 6 + Math.floor(Math.random() * 12);  // Range 6-18
-                state.contrast = 1.0 + (Math.random() * 0.5);   // Range 1.0-1.5
+                state.t = 10 + Math.floor(Math.random() * 25); 
+                state.s = 6 + Math.floor(Math.random() * 12);  
+                state.contrast = 1.0 + (Math.random() * 0.5);   
             }
         }
 
-        // 3. Main Processing Function (Round Robin)
         function processFrameRoundRobin() {
-            if (!scanning || analysisReady) return;
+            // FIX: Removed 'if (!scanning)' check so it works for File uploads
+            if (analysisReady) return;
 
             const w = offscreenCanvas.width;
             const h = offscreenCanvas.height;
@@ -448,38 +429,31 @@
 
             const imageData = offscreenCtx.getImageData(0, 0, w, h);
             
-            // Determine which channels to scan
             const targets = [];
             if (!results.r) targets.push({ch: 'r', idx: 0});
             if (!results.g) targets.push({ch: 'g', idx: 1});
             if (!results.b) targets.push({ch: 'b', idx: 2});
 
             if (targets.length === 0) {
-                analysisReady = true;
-                triggerCaptureSequence();
+                finishScan();
                 return;
             }
 
-            // Round Robin Logic: Pick one channel per frame
             if (targets.length > 0) {
-                rrIndex = (rrIndex + 1) % targets.length; // Cycle index
+                rrIndex = (rrIndex + 1) % targets.length;
                 const target = targets[rrIndex];
                 
                 const state = scannerStates[target.ch];
                 const binaryData = applyBradleyAdaptive(imageData, target.idx, state);
-                
-                // Use attemptBoth as requested
                 const code = jsQR(binaryData, w, h, { inversionAttempts: "attemptBoth" });
                 
                 if (code) {
                     results[target.ch] = code.data;
-                    state.fails = 0; // Reset fails on success
+                    state.fails = 0; 
                     updateViewfinderState(getFoundCount());
                     
-                    // Check if done
                     if (getFoundCount() === 3) {
-                        analysisReady = true;
-                        triggerCaptureSequence();
+                        finishScan();
                     }
                 } else {
                     updateScannerParams(state);
@@ -487,11 +461,24 @@
             }
         }
 
+        function finishScan() {
+            if(analysisReady) return;
+            analysisReady = true;
+
+            if (scanning) {
+                // Camera mode: capture frame from video
+                triggerCaptureSequence();
+            } else {
+                // File mode: frame is already in freeze-frame canvas
+                // Just show animation
+                startVisualizationSequence();
+            }
+        }
+
         function getFoundCount() {
             return (results.r?1:0) + (results.g?1:0) + (results.b?1:0);
         }
 
-        // 4. Optimized Loop
         function scanLoop() {
             if (!scanning) return;
             
@@ -504,7 +491,7 @@
             requestAnimationFrame(scanLoop);
         }
 
-        // --- ORIGINAL UI LOGIC (RESTORED) ---
+        // --- ORIGINAL UI LOGIC ---
 
         function generateQR() {
             const texts = [els.r.value, els.g.value, els.b.value];
@@ -630,12 +617,11 @@
         }
 
         async function startCamera() {
-            globalReset(); // Clear previous
+            globalReset(); 
             document.body.classList.add('mode-camera');
             els.viewfinder.classList.remove('hidden');
             els.resultIndicators.style.opacity = 0.7;
             
-            // Setup processing canvas
             offscreenCanvas.width = 480;
             offscreenCanvas.height = 480;
             
@@ -664,7 +650,6 @@
                 img.onload = () => {
                     prepareScannerUI();
                     
-                    // Setup canvas for static image
                     const s = 1024; 
                     offscreenCanvas.width = s; 
                     offscreenCanvas.height = s;
@@ -676,10 +661,10 @@
                     els.video.classList.add('hidden');
                     els.main.style.opacity = 0;
                     
-                    // Try scanning multiple times with different params since it's static
+                    // Run scanner loop manually for file
                     let attempts = 0;
                     const interval = setInterval(() => {
-                        if (analysisReady || attempts > 30) { 
+                        if (analysisReady || attempts > 40) { // Slightly more attempts for static image
                             clearInterval(interval);
                             if(!analysisReady) updateResultUI(); 
                             return;
@@ -710,7 +695,6 @@
 
         function prepareScannerUI() {
             results = {r:null, g:null, b:null}; analysisReady = false;
-            // Reset scanner states
             ['r', 'g', 'b'].forEach(ch => {
                 scannerStates[ch] = { fails: 0, t: 15, s: 8, contrast: 1.1 };
             });
